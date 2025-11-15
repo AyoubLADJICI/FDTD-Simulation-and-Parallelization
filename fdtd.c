@@ -210,13 +210,13 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  double start = GET_TIME();
+  double start = MPI_Wtime();
 
   for(int n = 0; n < nt; n++) {
     if(rank == 0 && n && (n % (nt / 10)) == 0) {
-      double time_sofar = GET_TIME() - start;
+      double time_sofar = MPI_Wtime() - start;
       double eta = (nt - n) * time_sofar / n;
-      printf("Computing time step %d/%d (ETA: %g seconds)     \r", n, nt, eta);
+      printf("Computing time step %d/%d (ETA: %g seconds) \r", n, nt, eta);
       fflush(stdout);
     }
 
@@ -278,7 +278,7 @@ int main(int argc, char **argv) {
     // write_manifest_vtk("hy", dt, nt, sampling_rate, 1);
   }
 
-  double time = GET_TIME() - start;
+  double time = MPI_Wtime() - start;
   if (rank == 0) {
     printf("\nDone: %g seconds (%g MUpdates/s)\n", time,
            1.e-6 * (double)nx * (double)ny * (double)nt / time);
