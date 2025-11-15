@@ -199,18 +199,22 @@ int main(int argc, char **argv) {
   double mu = 1.2566370614359173e-06;
 
   int problem_id = atoi(argv[1]);
+  const char* s_env = getenv("CFL");
+  double S = s_env ? atof(s_env) : 0.90;
+  if (rank == 0) printf("Using stability factor S = %g\n", S);
+
   switch(problem_id) {
   case 1: // small size problem
     dx = dy = (3.e8 / 2.4e9) / 20.; // wavelength / 20
     nx = ny = 500;
-    dt = 0.5 / (3.e8 * sqrt(1. / (dx * dx) + 1. / (dy * dy))); // cfl / 2
+    dt = S / (3.e8 * sqrt(1. / (dx * dx) + 1. / (dy * dy))); // cfl / 2
     nt = 500;
     sampling_rate = 5; // save 1 step out of 5
     break;
   case 2: // larger size problem, usable for initial scaling tests
     dx = dy = (3.e8 / 2.4e9) / 40.; // wavelength / 40
     nx = ny = 16000;
-    dt = 0.5 / (3.e8 * sqrt(1. / (dx * dx) + 1. / (dy * dy))); // cfl / 2
+    dt = S / (3.e8 * sqrt(1. / (dx * dx) + 1. / (dy * dy))); // cfl / 2
     nt = 500;
     sampling_rate = 0; // don't save results
     break;
