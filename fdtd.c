@@ -22,10 +22,6 @@ struct data {
 #define GET(data, i, j) ((data)->values[(data)->nx * (j) + (i)])
 #define SET(data, i, j, val) ((data)->values[(data)->nx * (j) + (i)] = (val))
 
-// Les macros utilisent maintenant local_nx (stocké dans data->nx)
-#define GET(data, i, j) ((data)->values[(data)->nx * (j) + (i)])
-#define SET(data, i, j, val) ((data)->values[(data)->nx * (j) + (i)] = (val))
-
 int init_data(struct data *data, const char *name, int nx, int ny, double dx,
               double dy, double val)
 {
@@ -146,6 +142,35 @@ int write_manifest_vtk(const char *name, double dt, int nt, int sampling_rate,
   return 0;
 }
 
+void find_best_partition(int nx, int ny, int num_ranks, int* Px_out, int* Py_out) {
+    double best_score = (double)INT32_MAX;
+    int best_Px = -1;
+    int best_Py = -1;
+
+    for (int Px = 1; Px <= num_ranks; Px++) {
+
+        if (num_ranks % Px != 0)
+            continue;
+
+        int Py = num_ranks / Px;
+
+        double sub_x = (double)nx / Px;
+        double sub_y = (double)ny / Py;
+
+        double ratio = sub_x / sub_y;
+        double score = fabs(1.0 - ratio);
+        
+        if (score < best_score) {
+            best_score = score;
+            best_Px = Px;
+            best_Py = Py;
+        }
+    }
+
+    *Px_out = best_Px;
+    *Py_out = best_Py;
+}
+
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
 
@@ -162,38 +187,11 @@ int main(int argc, char **argv) {
   MPI_Get_processor_name(processor_name, &name_len); // Get processor name
   printf("Processor name: %s\n", processor_name);
 
-  // Find the most square Px x Py process grid
-  int Px = 1, Py = num_ranks; 
-  for (int p = 1; p * p <= num_ranks; p++) {
-    if (num_ranks % p == 0) {
-      Px = p;
-      Py = num_ranks / p;
-    }
+  int Px, Py;
+  find_best_partition(nx, ny, num_ranks, &Px, &Py);
+  if (rank == 0) {
+    printf("Using a %d x %d partitioning of the domain\n", Px, Py);
   }
-
-  // Determine the coordinates of the current rank in the process grid
-  int rank_x = rank % Px;
-  int rank_y = rank / Px;
-  printf("Rank %d coordinates in process grid: (%d, %d)\n", rank, rank_x, rank_y);
-
-  if (rank == 0 && (num_ranks % Px != 0)) {
-    printf("Warning: number of ranks %d is not divisible by Px=%d\n", num_ranks, Px);
-  }
-
-  int local_nx = (nx/Px) + 2; // +2 for ghost cells
-  int local_ny = (ny/Py) + 2; 
-
-
-  // Manage the case where nx or ny is not perfectly divisible by Px or Py
-  if (rank_x == Px - 1) {
-    local_nx = (nx - (nx / Px) * (Px - 1)) + 2; // last rank in x direction
-  }
-  if (rank_y == Py - 1) {
-    local_ny = (ny - (ny / Py) * (Py - 1)) + 2; // last rank in y direction
-  }
-
-  int global_start_i = rank_x * (nx / Px);
-  int global_start_j = rank_y * (ny / Py);
 
   if(argc != 2) {
     if (rank == 0) {
@@ -239,14 +237,15 @@ int main(int argc, char **argv) {
   }
 
   struct data ez, hx, hy;
-  if(init_data(&ez, "ez", local_nx, local_ny, dx, dy, 0.) ||
-     init_data(&hx, "hx", local_nx, local_ny, dx, dy, 0.) ||
-     init_data(&hy, "hy", local_nx, local_ny, dx, dy, 0.)) {
+  if(init_data(&ez, "ez", nx, ny, dx, dy, 0.) ||
+     init_data(&hx, "hx", nx, ny - 1, dx, dy, 0.) ||
+     init_data(&hy, "hy", nx - 1, ny, dx, dy, 0.)) {
     printf("Error: could not allocate data on rank %d\n", rank);
     MPI_Finalize();
     return 1;
   }
-
+ 
+  MPI_Barrier(MPI_COMM_WORLD);
   double start = MPI_Wtime();
 
   for(int n = 0; n < nt; n++) {
@@ -259,16 +258,17 @@ int main(int argc, char **argv) {
 
     // update hx and hy
     double chy = dt / (dy * mu);
-    for(int i = 1; i < local_nx - 1; i++) {
-      for(int j = 1; j < local_ny - 2; j++) {
+    for(int i = 0; i < nx; i++) {
+      for(int j = 0; j < ny - 1; j++) {
         double hx_ij =
           GET(&hx, i, j) - chy * (GET(&ez, i, j + 1) - GET(&ez, i, j));
         SET(&hx, i, j, hx_ij);
       }
     }
+    
     double chx = dt / (dx * mu);
-    for(int i = 1; i < local_nx - 2; i++) {
-      for(int j = 1; j < local_ny - 1; j++) {
+    for(int i = 0; i < nx - 1; i++) {
+      for(int j = 0; j < ny; j++) {
         double hy_ij =
           GET(&hy, i, j) + chx * (GET(&ez, i + 1, j) - GET(&ez, i, j));
         SET(&hy, i, j, hy_ij);
@@ -277,8 +277,8 @@ int main(int argc, char **argv) {
 
     // update ez
     double cex = dt / (dx * eps), cey = dt / (dy * eps);
-    for(int i = 1; i < local_nx - 2; i++) {
-      for(int j = 1; j < local_ny - 2; j++) {
+    for(int i = 1; i < nx - 1; i++) {
+      for(int j = 1; j < ny - 1; j++) {
         double ez_ij = GET(&ez, i, j) +
                        cex * (GET(&hy, i, j) - GET(&hy, i - 1, j)) -
                        cey * (GET(&hx, i, j) - GET(&hx, i, j - 1));
@@ -295,7 +295,7 @@ int main(int argc, char **argv) {
       SET(&ez, nx / 2, ny / 2, sin(2. * M_PI * 2.4e9 * t));
       break;
     default:
-      printf("Error: unknown source\n");
+      if (rank == 0) printf("Error: unknown source\n");
       break;
     }
 
@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
   free_data(&ez);
   free_data(&hx);
   free_data(&hy);
-  
+
   MPI_Finalize();
   return 0;
 }
