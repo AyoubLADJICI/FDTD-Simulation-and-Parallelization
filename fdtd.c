@@ -273,7 +273,7 @@ int main(int argc, char **argv) {
 
   // write VTK manifest, linking to individual step data files
   if (rank == 0) {
-    write_manifest_vtk("ez", dt, nt, sampling_rate, size);
+    write_manifest_vtk("ez", dt, nt, sampling_rate, num_ranks);
     // write_manifest_vtk("hx", dt, nt, sampling_rate, 1);
     // write_manifest_vtk("hy", dt, nt, sampling_rate, 1);
   }
