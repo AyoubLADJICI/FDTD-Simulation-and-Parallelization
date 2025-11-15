@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#include <mpi.h>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -141,10 +142,27 @@ int write_manifest_vtk(const char *name, double dt, int nt, int sampling_rate,
   return 0;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
+  MPI_Init(&argc, &argv);
+
+  int num_ranks;
+  MPI_Comm_size(MPI_COMM_WORLD, &num_ranks); // Get number of ranks
+  printf("Number of MPI ranks: %d\n", num_ranks);
+
+  int rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank); // Get current rank
+  printf("Current MPI rank: %d\n", rank);
+
+  char processor_name[MPI_MAX_PROCESSOR_NAME];
+  int name_len;
+  MPI_Get_processor_name(processor_name, &name_len); // Get processor name
+  printf("Processor name: %s\n", processor_name);
+
   if(argc != 2) {
-    printf("Usage: %s problem_id\n", argv[0]);
+    if (rank == 0) {
+      printf("Usage: %s problem_id\n", argv[0]);
+    }
+    MPI_Finalize();
     return 1;
   }
 
@@ -175,23 +193,27 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  printf("Solving problem %d:\n", problem_id);
-  printf(" - space %gm x %gm (dx=%g, dy=%g; nx=%d, ny=%d)\n",
-         dx * nx, dy * ny, dx, dy, nx, ny);
-  printf(" - time %gs (dt=%g, nt=%d)\n", dt * nt, dt, nt);
+  // We want that only rank 0 prints the initial information
+  if (rank == 0) {
+    printf("Solving problem %d:\n", problem_id);
+    printf(" - space %gm x %gm (dx=%g, dy=%g; nx=%d, ny=%d)\n",
+          dx * nx, dy * ny, dx, dy, nx, ny);
+    printf(" - time %gs (dt=%g, nt=%d)\n", dt * nt, dt, nt);
+  }
 
   struct data ez, hx, hy;
   if(init_data(&ez, "ez", nx, ny, dx, dy, 0.) ||
      init_data(&hx, "hx", nx, ny - 1, dx, dy, 0.) ||
      init_data(&hy, "hy", nx - 1, ny, dx, dy, 0.)) {
-    printf("Error: could not allocate data\n");
+    printf("Error: could not allocate data on rank %d\n", rank);
+    MPI_Finalize();
     return 1;
   }
 
   double start = GET_TIME();
 
   for(int n = 0; n < nt; n++) {
-    if(n && (n % (nt / 10)) == 0) {
+    if(rank == 0 && n && (n % (nt / 10)) == 0) {
       double time_sofar = GET_TIME() - start;
       double eta = (nt - n) * time_sofar / n;
       printf("Computing time step %d/%d (ETA: %g seconds)     \r", n, nt, eta);
@@ -242,25 +264,31 @@ int main(int argc, char **argv)
 
     // output step data in VTK format
     if(sampling_rate && !(n % sampling_rate)) {
-      write_data_vtk(&ez, n, 0);
+      write_data_vtk(&ez, n, rank);
+      // write_data_vtk(&ez, n, 0);
       // write_data_vtk(&hx, n, 0);
       // write_data_vtk(&hy, n, 0);
     }
   }
 
   // write VTK manifest, linking to individual step data files
-  write_manifest_vtk("ez", dt, nt, sampling_rate, 1);
-  // write_manifest_vtk("hx", dt, nt, sampling_rate, 1);
-  // write_manifest_vtk("hy", dt, nt, sampling_rate, 1);
+  if (rank == 0) {
+    write_manifest_vtk("ez", dt, nt, sampling_rate, size);
+    // write_manifest_vtk("hx", dt, nt, sampling_rate, 1);
+    // write_manifest_vtk("hy", dt, nt, sampling_rate, 1);
+  }
 
   double time = GET_TIME() - start;
-  printf("\nDone: %g seconds (%g MUpdates/s)\n", time,
-         1.e-6 * (double)nx * (double)ny * (double)nt / time);
+  if (rank == 0) {
+    printf("\nDone: %g seconds (%g MUpdates/s)\n", time,
+           1.e-6 * (double)nx * (double)ny * (double)nt / time);
+  }
 
   free_data(&ez);
   free_data(&hx);
   free_data(&hy);
-
+  
+  MPI_Finalize();
   return 0;
 }
 
