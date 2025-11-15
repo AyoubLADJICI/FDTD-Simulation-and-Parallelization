@@ -158,6 +158,15 @@ int main(int argc, char **argv) {
   MPI_Get_processor_name(processor_name, &name_len); // Get processor name
   printf("Processor name: %s\n", processor_name);
 
+  // Find the most square Px x Py process grid
+  int Px = 1, Py = num_ranks; 
+  for (int p = 1; p * p <= num_ranks; p++) {
+    if (num_ranks % p == 0) {
+      Px = p;
+      Py = num_ranks / p;
+    }
+  }
+
   if(argc != 2) {
     if (rank == 0) {
       printf("Usage: %s problem_id\n", argv[0]);
