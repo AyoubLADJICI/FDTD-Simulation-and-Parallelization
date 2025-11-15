@@ -184,10 +184,6 @@ int main(int argc, char **argv) {
   MPI_Get_processor_name(processor_name, &name_len); // Get processor name
   printf("Processor name: %s\n", processor_name);
 
-  if (rank == 0) {
-    printf("Using a %d x %d partitioning of the domain\n", Px, Py);
-  }
-
   if(argc != 2) {
     if (rank == 0) {
       printf("Usage: %s problem_id\n", argv[0]);
@@ -233,6 +229,9 @@ int main(int argc, char **argv) {
 
   int Px, Py;
   find_best_partition(nx, ny, num_ranks, &Px, &Py);
+  if (rank == 0) {
+    printf("Using a %d x %d partitioning of the domain\n", Px, Py);
+  }
 
   struct data ez, hx, hy;
   if(init_data(&ez, "ez", nx, ny, dx, dy, 0.) ||
