@@ -233,17 +233,44 @@ int main(int argc, char **argv) {
     printf("Using a %d x %d partitioning of the domain\n", Px, Py);
   }
 
+  // determine this rank's position in the Px x Py grid
+  int rank_x = rank % Px;
+  int rank_y = rank / Px;
+
+  // determine neighboring ranks
+  const int left_rank = rank_x > 0 ? rank - 1 : MPI_PROC_NULL;
+  const int right_rank = rank_x < Px - 1 ? rank + 1 : MPI_PROC_NULL;
+  const int down_rank = rank_y < Py - 1 ? rank + Px : MPI_PROC_NULL;
+  const int up_rank = rank_y > 0 ? rank - Px : MPI_PROC_NULL;
+
+  // determine this rank's local domain size
+  int local_nx = (nx / Px) + 2; // +2 for ghost cells
+  int local_ny = (ny / Py) + 2;
+  
+  if (rank_x == Px - 1) local_nx = (nx - (nx / Px) * (Px - 1)) + 2;
+  if (rank_y == Py - 1) local_ny = (ny - (ny / Py) * (Py - 1)) + 2;
+
+  int global_i_start = rank_x * (nx / Px);
+  int global_j_start = rank_y * (ny / Py);
+
   struct data ez, hx, hy;
-  if(init_data(&ez, "ez", nx, ny, dx, dy, 0.) ||
-     init_data(&hx, "hx", nx, ny - 1, dx, dy, 0.) ||
-     init_data(&hy, "hy", nx - 1, ny, dx, dy, 0.)) {
+  if(init_data(&ez, "ez", local_nx, local_ny, dx, dy, 0.) ||
+     init_data(&hx, "hx", local_nx, local_ny, dx, dy, 0.) ||
+     init_data(&hy, "hy", local_nx, local_ny, dx, dy, 0.)) {
     printf("Error: could not allocate data on rank %d\n", rank);
     MPI_Finalize();
     return 1;
   }
- 
+  
+  MPI_Datatype hy_col_type;
+  MPI_Type_vector(local_ny - 2, 1, local_nx, MPI_DOUBLE, &hy_col_type);
+  MPI_Type_commit(&hy_col_type);
   MPI_Barrier(MPI_COMM_WORLD);
   double start = MPI_Wtime();
+
+  MPI_Request send_requests[4];
+  MPI_Request recv_requests[4];
+  MPI_Status  statuses[4]; 
 
   for(int n = 0; n < nt; n++) {
     if(rank == 0 && n && (n % (nt / 10)) == 0) {
@@ -255,8 +282,8 @@ int main(int argc, char **argv) {
 
     // update hx and hy
     double chy = dt / (dy * mu);
-    for(int i = 0; i < nx; i++) {
-      for(int j = 0; j < ny - 1; j++) {
+    for(int i = 1; i < local_nx - 1; i++) {
+      for(int j = 1; j < local_ny - 2; j++) {
         double hx_ij =
           GET(&hx, i, j) - chy * (GET(&ez, i, j + 1) - GET(&ez, i, j));
         SET(&hx, i, j, hx_ij);
@@ -264,18 +291,30 @@ int main(int argc, char **argv) {
     }
     
     double chx = dt / (dx * mu);
-    for(int i = 0; i < nx - 1; i++) {
-      for(int j = 0; j < ny; j++) {
+    for(int i = 1; i < local_nx - 2; i++) {
+      for(int j = 1; j < local_ny - 1; j++) {
         double hy_ij =
           GET(&hy, i, j) + chx * (GET(&ez, i + 1, j) - GET(&ez, i, j));
         SET(&hy, i, j, hy_ij);
       }
     }
 
+    // Recevoir les fantômes
+    MPI_Irecv(&GET(&hx, 1, 0), local_nx - 2, MPI_DOUBLE, down_rank, 0, MPI_COMM_WORLD, &recv_requests[0]);
+    MPI_Irecv(&GET(&hx, 1, local_ny - 1), local_nx - 2, MPI_DOUBLE, up_rank, 1, MPI_COMM_WORLD, &recv_requests[1]); 
+    MPI_Irecv(&GET(&hy, 0, 1), 1, hy_col_type, left_rank, 2, MPI_COMM_WORLD, &recv_requests[2]); 
+    MPI_Irecv(&GET(&hy, local_nx - 1, 1), 1, hy_col_type, right_rank, 3, MPI_COMM_WORLD, &recv_requests[3]); 
+
+    // Envoyer nos bordures
+    MPI_Isend(&GET(&hx, 1, 1), local_nx - 2, MPI_DOUBLE, down_rank, 1, MPI_COMM_WORLD, &send_requests[0]); 
+    MPI_Isend(&GET(&hx, 1, local_ny - 2), local_nx - 2, MPI_DOUBLE, up_rank, 0, MPI_COMM_WORLD, &send_requests[1]); 
+    MPI_Isend(&GET(&hy, 1, 1), 1, hy_col_type, left_rank,  3, MPI_COMM_WORLD, &send_requests[2]); 
+    MPI_Isend(&GET(&hy, local_nx - 2, 1), 1, hy_col_type, right_rank, 2, MPI_COMM_WORLD, &send_requests[3]); 
+
     // update ez
     double cex = dt / (dx * eps), cey = dt / (dy * eps);
-    for(int i = 1; i < nx - 1; i++) {
-      for(int j = 1; j < ny - 1; j++) {
+    for(int i = 2; i < local_nx - 2; i++) {
+      for(int j = 2; j < local_ny - 2; j++) {
         double ez_ij = GET(&ez, i, j) +
                        cex * (GET(&hy, i, j) - GET(&hy, i - 1, j)) -
                        cey * (GET(&hx, i, j) - GET(&hx, i, j - 1));
@@ -283,13 +322,54 @@ int main(int argc, char **argv) {
       }
     }
 
+    MPI_Waitall(4, recv_requests, statuses);
+
+    for(int j = 1; j < local_ny - 1; j++) {
+      double ez_ij = GET(&ez, 1, j) +
+                     cex * (GET(&hy, 1, j) - GET(&hy, 0, j)) - // hy[0,j] is ghost
+                     cey * (GET(&hx, 1, j) - GET(&hx, 1, j - 1));
+      SET(&ez, 1, j, ez_ij);
+    }
+
+    for(int j = 1; j < local_ny - 1; j++) {
+      double ez_ij = GET(&ez, local_nx - 2, j) +
+                     cex * (GET(&hy, local_nx - 2, j) - GET(&hy, local_nx - 3, j)) -
+                     cey * (GET(&hx, local_nx - 2, j) - GET(&hx, local_nx - 2, j - 1));
+      SET(&ez, local_nx - 2, j, ez_ij);
+    }
+
+    for(int i = 2; i < local_nx - 2; i++) { 
+      double ez_ij = GET(&ez, i, 1) +
+                     cex * (GET(&hy, i, 1) - GET(&hy, i - 1, 1)) -
+                     cey * (GET(&hx, i, 1) - GET(&hx, i, 0)); // hx[i,0] is ghost
+      SET(&ez, i, 1, ez_ij);
+    }
+
+    for(int i = 2; i < local_nx - 2; i++) { 
+      double ez_ij = GET(&ez, i, local_ny - 2) +
+                     cex * (GET(&hy, i, local_ny - 2) - GET(&hy, i - 1, local_ny - 2)) -
+                     cey * (GET(&hx, i, local_ny - 2) - GET(&hx, i, local_ny - 3));
+      SET(&ez, i, local_ny - 2, ez_ij);
+    }
+
     // impose source
     double t = n * dt;
     switch(problem_id) {
     case 1:
     case 2:
+      int source_i_global = nx / 2;
+      int source_j_global = ny / 2;
+
+      if (source_i_global >= global_i_start &&
+          source_i_global < (global_i_start + local_nx - 2) &&
+          source_j_global >= global_j_start &&
+          source_j_global < (global_j_start + local_ny - 2)) {
+        int source_i_local = (source_i_global - global_i_start) + 1; // +1 for ghost cell
+        int source_j_local = (source_j_global - global_j_start) + 1; // +1 for ghost cell
       // sinusoidal excitation at 2.4 GHz in the middle of the domain
-      SET(&ez, nx / 2, ny / 2, sin(2. * M_PI * 2.4e9 * t));
+      SET(&ez, source_i_local, source_j_local, sin(2. * M_PI * 2.4e9 * t));
+      }
+      //SET(&ez, nx / 2, ny / 2, sin(2. * M_PI * 2.4e9 * t));
       break;
     default:
       if (rank == 0) printf("Error: unknown source\n");
