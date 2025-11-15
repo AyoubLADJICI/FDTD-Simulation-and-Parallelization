@@ -23,8 +23,7 @@ struct data {
 #define SET(data, i, j, val) ((data)->values[(data)->nx * (j) + (i)] = (val))
 
 int init_data(struct data *data, const char *name, int nx, int ny, double dx,
-              double dy, double val)
-{
+              double dy, double val) {
   data->name = name;
   data->nx = nx;
   data->ny = ny;
@@ -41,8 +40,7 @@ int init_data(struct data *data, const char *name, int nx, int ny, double dx,
 
 void free_data(struct data *data) { free(data->values); }
 
-int write_data_vtk(struct data *data, int step, int rank)
-{
+int write_data_vtk(struct data *data, int step, int rank) {
   char out[512];
   if(strlen(data->name) > 256) {
     printf("Error: data name too long for output VTK file\n");
@@ -102,8 +100,7 @@ int write_data_vtk(struct data *data, int step, int rank)
 }
 
 int write_manifest_vtk(const char *name, double dt, int nt, int sampling_rate,
-                       int numranks)
-{
+                       int numranks) {
   char out[512];
   if(strlen(name) > 256) {
     printf("Error: name too long for Paraview manifest file\n");
