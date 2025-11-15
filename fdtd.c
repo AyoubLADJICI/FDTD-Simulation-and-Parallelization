@@ -22,6 +22,10 @@ struct data {
 #define GET(data, i, j) ((data)->values[(data)->nx * (j) + (i)])
 #define SET(data, i, j, val) ((data)->values[(data)->nx * (j) + (i)] = (val))
 
+// Les macros utilisent maintenant local_nx (stocké dans data->nx)
+#define GET(data, i, j) ((data)->values[(data)->nx * (j) + (i)])
+#define SET(data, i, j, val) ((data)->values[(data)->nx * (j) + (i)] = (val))
+
 int init_data(struct data *data, const char *name, int nx, int ny, double dx,
               double dy, double val)
 {
@@ -176,6 +180,21 @@ int main(int argc, char **argv) {
     printf("Warning: number of ranks %d is not divisible by Px=%d\n", num_ranks, Px);
   }
 
+  int local_nx = (nx/Px) + 2; // +2 for ghost cells
+  int local_ny = (ny/Py) + 2; 
+
+
+  // Manage the case where nx or ny is not perfectly divisible by Px or Py
+  if (rank_x == Px - 1) {
+    local_nx = (nx - (nx / Px) * (Px - 1)) + 2; // last rank in x direction
+  }
+  if (rank_y == Py - 1) {
+    local_ny = (ny - (ny / Py) * (Py - 1)) + 2; // last rank in y direction
+  }
+
+  int global_start_i = rank_x * (nx / Px);
+  int global_start_j = rank_y * (ny / Py);
+
   if(argc != 2) {
     if (rank == 0) {
       printf("Usage: %s problem_id\n", argv[0]);
@@ -220,9 +239,9 @@ int main(int argc, char **argv) {
   }
 
   struct data ez, hx, hy;
-  if(init_data(&ez, "ez", nx, ny, dx, dy, 0.) ||
-     init_data(&hx, "hx", nx, ny - 1, dx, dy, 0.) ||
-     init_data(&hy, "hy", nx - 1, ny, dx, dy, 0.)) {
+  if(init_data(&ez, "ez", local_nx, local_ny, dx, dy, 0.) ||
+     init_data(&hx, "hx", local_nx, local_ny, dx, dy, 0.) ||
+     init_data(&hy, "hy", local_nx, local_ny, dx, dy, 0.)) {
     printf("Error: could not allocate data on rank %d\n", rank);
     MPI_Finalize();
     return 1;
@@ -240,16 +259,16 @@ int main(int argc, char **argv) {
 
     // update hx and hy
     double chy = dt / (dy * mu);
-    for(int i = 0; i < nx; i++) {
-      for(int j = 0; j < ny - 1; j++) {
+    for(int i = 1; i < local_nx - 1; i++) {
+      for(int j = 1; j < local_ny - 2; j++) {
         double hx_ij =
           GET(&hx, i, j) - chy * (GET(&ez, i, j + 1) - GET(&ez, i, j));
         SET(&hx, i, j, hx_ij);
       }
     }
     double chx = dt / (dx * mu);
-    for(int i = 0; i < nx - 1; i++) {
-      for(int j = 0; j < ny; j++) {
+    for(int i = 1; i < local_nx - 2; i++) {
+      for(int j = 1; j < local_ny - 1; j++) {
         double hy_ij =
           GET(&hy, i, j) + chx * (GET(&ez, i + 1, j) - GET(&ez, i, j));
         SET(&hy, i, j, hy_ij);
@@ -258,8 +277,8 @@ int main(int argc, char **argv) {
 
     // update ez
     double cex = dt / (dx * eps), cey = dt / (dy * eps);
-    for(int i = 1; i < nx - 1; i++) {
-      for(int j = 1; j < ny - 1; j++) {
+    for(int i = 1; i < local_nx - 2; i++) {
+      for(int j = 1; j < local_ny - 2; j++) {
         double ez_ij = GET(&ez, i, j) +
                        cex * (GET(&hy, i, j) - GET(&hy, i - 1, j)) -
                        cey * (GET(&hx, i, j) - GET(&hx, i, j - 1));
