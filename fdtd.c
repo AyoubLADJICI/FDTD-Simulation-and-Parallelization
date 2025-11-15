@@ -167,6 +167,15 @@ int main(int argc, char **argv) {
     }
   }
 
+  // Determine the coordinates of the current rank in the process grid
+  int rank_x = rank % Px;
+  int rank_y = rank / Px;
+  printf("Rank %d coordinates in process grid: (%d, %d)\n", rank, rank_x, rank_y);
+
+  if (rank == 0 && (num_ranks % Px != 0)) {
+    printf("Warning: number of ranks %d is not divisible by Px=%d\n", num_ranks, Px);
+  }
+
   if(argc != 2) {
     if (rank == 0) {
       printf("Usage: %s problem_id\n", argv[0]);
