@@ -1,0 +1,25 @@
+Number of MPI ranks: 16
+Rank 0 running on processor nic5-w020
+Using stability factor S = 0.9
+Solving problem 2:
+ - space 50m x 50m (dx=0.003125, dy=0.003125; nx=16000, ny=16000)
+ - time 3.31456e-09s (dt=6.62913e-12, nt=500)
+Using a 4 x 4 partitioning of the domain
+Rank 0 coordinates (0,0) offset (0,0) local size (4000,4000)
+Rank 9 coordinates (2,1) offset (8000,4000) local size (4000,4000)
+Rank 5 coordinates (1,1) offset (4000,4000) local size (4000,4000)
+Rank 11 coordinates (2,3) offset (8000,12000) local size (4000,4000)
+Rank 13 coordinates (3,1) offset (12000,4000) local size (4000,4000)
+Rank 7 coordinates (1,3) offset (4000,12000) local size (4000,4000)
+Rank 3 coordinates (0,3) offset (0,12000) local size (4000,4000)
+Rank 8 coordinates (2,0) offset (8000,0) local size (4000,4000)
+Rank 10 coordinates (2,2) offset (8000,8000) local size (4000,4000)
+Rank 12 coordinates (3,0) offset (12000,0) local size (4000,4000)
+Rank 14 coordinates (3,2) offset (12000,8000) local size (4000,4000)
+Rank 15 coordinates (3,3) offset (12000,12000) local size (4000,4000)
+Rank 1 coordinates (0,1) offset (0,4000) local size (4000,4000)
+Computing time step 50/500 (ETA: 202.383 seconds) Computing time step 100/500 (ETA: 179.234 seconds) Computing time step 150/500 (ETA: 155.313 seconds) Computing time step 200/500 (ETA: 132.495 seconds) Computing time step 250/500 (ETA: 110.069 seconds) Computing time step 300/500 (ETA: 88.0028 seconds) Computing time step 350/500 (ETA: 65.9481 seconds) Computing time step 400/500 (ETA: 43.9308 seconds) Computing time step 450/500 (ETA: 21.9355 seconds) 
+Done: 219.384 seconds (583.451 MUpdates/s)
+Rank 2 coordinates (0,2) offset (0,8000) local size (4000,4000)
+Rank 4 coordinates (1,0) offset (4000,0) local size (4000,4000)
+Rank 6 coordinates (1,2) offset (4000,8000) local size (4000,4000)

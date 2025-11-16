@@ -2,9 +2,9 @@
 #SBATCH --job-name=fdtd_mpi_pb2
 #SBATCH --partition=batch
 #SBATCH --nodes=1
-#SBATCH --ntasks=8
+#SBATCH --ntasks=16
 #SBATCH --cpus-per-task=1
-#SBATCH --time=05:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=fdtd_mpi_pb2%j.out
 
 PROJECT_DIR="${HOME}/project_info0939/project_info0939"

@@ -4,6 +4,7 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#include <limits.h>
 #include <mpi.h>
 
 #if defined(_OPENMP)
@@ -168,21 +169,164 @@ void find_best_partition(int nx, int ny, int num_ranks, int* Px_out, int* Py_out
     *Py_out = best_Py;
 }
 
+void exchange_halo_ez(MPI_Comm comm_cart, int rank_x, int rank_y, int Px, int Py,
+                      struct data *ez, int nx_local, int ny_local) {
+    // Obtenir les rangs des voisins
+    int rank_north, rank_south, rank_east, rank_west;
+    MPI_Cart_shift(comm_cart, 0, 1, &rank_west, &rank_east);  // dim 0 pour X
+    MPI_Cart_shift(comm_cart, 1, 1, &rank_south, &rank_north); // dim 1 pour Y
+
+    // Tampons de communication pour EZ (dimensions: nx_local pour vertical, ny_local pour horizontal)
+    // On a besoin de buffers pour 4 directions (send et recv)
+    double *send_buffer_west = (double*) malloc(ny_local * sizeof(double));
+    double *recv_buffer_west = (double*) malloc(ny_local * sizeof(double));
+    double *send_buffer_east = (double*) malloc(ny_local * sizeof(double));
+    double *recv_buffer_east = (double*) malloc(ny_local * sizeof(double));
+
+    double *send_buffer_south = (double*) malloc(nx_local * sizeof(double));
+    double *recv_buffer_south = (double*) malloc(nx_local * sizeof(double));
+    double *send_buffer_north = (double*) malloc(nx_local * sizeof(double));
+    double *recv_buffer_north = (double*) malloc(nx_local * sizeof(double));
+
+    // PACKING : Copier les données des bords internes de EZ vers les tampons d'envoi
+    // BORD OUEST (colonne 1 interne)
+    for (int j = 0; j < ny_local; j++) send_buffer_west[j] = GET(ez, 1, j + 1);
+    // BORD EST (colonne nx_local interne)
+    for (int j = 0; j < ny_local; j++) send_buffer_east[j] = GET(ez, nx_local, j + 1);
+    // BORD SUD (rangée 1 interne)
+    for (int i = 0; i < nx_local; i++) send_buffer_south[i] = GET(ez, i + 1, 1);
+    // BORD NORD (rangée ny_local interne)
+    for (int i = 0; i < nx_local; i++) send_buffer_north[i] = GET(ez, i + 1, ny_local);
+
+    // COMMUNICATIONS (envoi/réception)
+    // Utiliser des paires de tags différentes pour éviter les deadlocks et distinguer les messages
+    // Par exemple, 0/1 pour X, 2/3 pour Y.
+    // Échange WEST-EAST (colonnes)
+    if (rank_west != MPI_PROC_NULL) {
+        MPI_Send(send_buffer_west, ny_local, MPI_DOUBLE, rank_west, 0, comm_cart);
+        MPI_Recv(recv_buffer_west, ny_local, MPI_DOUBLE, rank_west, 1, comm_cart, MPI_STATUS_IGNORE);
+    }
+    if (rank_east != MPI_PROC_NULL) {
+        MPI_Send(send_buffer_east, ny_local, MPI_DOUBLE, rank_east, 1, comm_cart);
+        MPI_Recv(recv_buffer_east, ny_local, MPI_DOUBLE, rank_east, 0, comm_cart, MPI_STATUS_IGNORE);
+    }
+    // Échange SOUTH-NORTH (rangées)
+    if (rank_south != MPI_PROC_NULL) {
+        MPI_Send(send_buffer_south, nx_local, MPI_DOUBLE, rank_south, 2, comm_cart);
+        MPI_Recv(recv_buffer_south, nx_local, MPI_DOUBLE, rank_south, 3, comm_cart, MPI_STATUS_IGNORE);
+    }
+    if (rank_north != MPI_PROC_NULL) {
+        MPI_Send(send_buffer_north, nx_local, MPI_DOUBLE, rank_north, 3, comm_cart);
+        MPI_Recv(recv_buffer_north, nx_local, MPI_DOUBLE, rank_north, 2, comm_cart, MPI_STATUS_IGNORE);
+    }
+
+    // UNPACKING : Copier les données reçues dans les halos de EZ
+    // HALO OUEST (colonne 0)
+    if (rank_west != MPI_PROC_NULL) {
+        for (int j = 0; j < ny_local; j++) SET(ez, 0, j + 1, recv_buffer_west[j]);
+    }
+    // HALO EST (colonne nx_local + 1)
+    if (rank_east != MPI_PROC_NULL) {
+        for (int j = 0; j < ny_local; j++) SET(ez, nx_local + 1, j + 1, recv_buffer_east[j]);
+    }
+    // HALO SUD (rangée 0)
+    if (rank_south != MPI_PROC_NULL) {
+        for (int i = 0; i < nx_local; i++) SET(ez, i + 1, 0, recv_buffer_south[i]);
+    }
+    // HALO NORD (rangée ny_local + 1)
+    if (rank_north != MPI_PROC_NULL) {
+        for (int i = 0; i < nx_local; i++) SET(ez, i + 1, ny_local + 1, recv_buffer_north[i]);
+    }
+
+    free(send_buffer_west); free(recv_buffer_west);
+    free(send_buffer_east); free(recv_buffer_east);
+    free(send_buffer_south); free(recv_buffer_south);
+    free(send_buffer_north); free(recv_buffer_north);
+}
+
+void exchange_halo_h(MPI_Comm comm_cart, int rank_x, int rank_y, int Px, int Py,
+                     struct data *hx, struct data *hy, int nx_local, int ny_local, 
+                     int real_local_ny_hx, int real_local_nx_hy, 
+                     int real_local_nx_ez, int real_local_ny_ez) {
+    // Obtenir les rangs des voisins (mêmes que pour EZ)
+    int rank_north, rank_south, rank_east, rank_west;
+    MPI_Cart_shift(comm_cart, 0, 1, &rank_west, &rank_east);
+    MPI_Cart_shift(comm_cart, 1, 1, &rank_south, &rank_north);
+
+    // --- Tampons et échanges pour Hx ---
+    // Hx n'a pas de halo en Y car sa taille "réelle" est ny_local+1 (de 0 à ny_local)
+    // Hx a un halo en X (colonnes 0 et nx_local+1)
+    // Send/Recv pour Hx (colonnes)
+    double *send_hx_west = (double*) malloc(real_local_ny_hx * sizeof(double));
+    double *recv_hx_west = (double*) malloc(real_local_ny_hx * sizeof(double));
+    double *send_hx_east = (double*) malloc(real_local_ny_hx * sizeof(double));
+    double *recv_hx_east = (double*) malloc(real_local_ny_hx * sizeof(double));
+
+    // PACKING Hx : Colonnes 1 (ouest) et nx_local (est)
+    for (int j = 0; j < real_local_ny_hx; j++) send_hx_west[j] = GET(hx, 1, j);
+    for (int j = 0; j < real_local_ny_hx; j++) send_hx_east[j] = GET(hx, nx_local, j);
+
+    // COMMUNICATIONS Hx
+    if (rank_west != MPI_PROC_NULL) {
+        MPI_Send(send_hx_west, real_local_ny_hx, MPI_DOUBLE, rank_west, 4, comm_cart); // tag 4
+        MPI_Recv(recv_hx_west, real_local_ny_hx, MPI_DOUBLE, rank_west, 5, comm_cart, MPI_STATUS_IGNORE); // tag 5
+    }
+    if (rank_east != MPI_PROC_NULL) {
+        MPI_Send(send_hx_east, real_local_ny_hx, MPI_DOUBLE, rank_east, 5, comm_cart); // tag 5
+        MPI_Recv(recv_hx_east, real_local_ny_hx, MPI_DOUBLE, rank_east, 4, comm_cart, MPI_STATUS_IGNORE); // tag 4
+    }
+
+    // UNPACKING Hx : Halos Hx (colonnes 0 et nx_local+1)
+    if (rank_west != MPI_PROC_NULL) {
+        for (int j = 0; j < real_local_ny_hx; j++) SET(hx, 0, j, recv_hx_west[j]);
+    }
+    if (rank_east != MPI_PROC_NULL) {
+        for (int j = 0; j < real_local_ny_hx; j++) SET(hx, nx_local + 1, j, recv_hx_east[j]);
+    }
+    free(send_hx_west); free(recv_hx_west); free(send_hx_east); free(recv_hx_east);
+
+
+    // --- Tampons et échanges pour Hy ---
+    // Hy n'a pas de halo en X car sa taille "réelle" est nx_local+1 (de 0 à nx_local)
+    // Hy a un halo en Y (rangées 0 et ny_local+1)
+    // Send/Recv pour Hy (rangées)
+    double *send_hy_south = (double*) malloc(real_local_nx_hy * sizeof(double));
+    double *recv_hy_south = (double*) malloc(real_local_nx_hy * sizeof(double));
+    double *send_hy_north = (double*) malloc(real_local_nx_hy * sizeof(double));
+    double *recv_hy_north = (double*) malloc(real_local_nx_hy * sizeof(double));
+
+    // PACKING Hy : Rangées 1 (sud) et ny_local (nord)
+    for (int i = 0; i < real_local_nx_hy; i++) send_hy_south[i] = GET(hy, i, 1);
+    for (int i = 0; i < real_local_nx_hy; i++) send_hy_north[i] = GET(hy, i, ny_local);
+
+    // COMMUNICATIONS Hy
+    if (rank_south != MPI_PROC_NULL) {
+        MPI_Send(send_hy_south, real_local_nx_hy, MPI_DOUBLE, rank_south, 6, comm_cart); // tag 6
+        MPI_Recv(recv_hy_south, real_local_nx_hy, MPI_DOUBLE, rank_south, 7, comm_cart, MPI_STATUS_IGNORE); // tag 7
+    }
+    if (rank_north != MPI_PROC_NULL) {
+        MPI_Send(send_hy_north, real_local_nx_hy, MPI_DOUBLE, rank_north, 7, comm_cart); // tag 7
+        MPI_Recv(recv_hy_north, real_local_nx_hy, MPI_DOUBLE, rank_north, 6, comm_cart, MPI_STATUS_IGNORE); // tag 6
+    }
+
+    // UNPACKING Hy : Halos Hy (rangées 0 et ny_local+1)
+    if (rank_south != MPI_PROC_NULL) {
+        for (int i = 0; i < real_local_nx_hy; i++) SET(hy, i, 0, recv_hy_south[i]);
+    }
+    if (rank_north != MPI_PROC_NULL) {
+        for (int i = 0; i < real_local_nx_hy; i++) SET(hy, i, ny_local + 1, recv_hy_north[i]);
+    }
+    free(send_hy_south); free(recv_hy_south); free(send_hy_north); free(recv_hy_north);
+}
+
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
 
-  int num_ranks;
+  int num_ranks, rank;
   MPI_Comm_size(MPI_COMM_WORLD, &num_ranks); // Get number of ranks
-  printf("Number of MPI ranks: %d\n", num_ranks);
-
-  int rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank); // Get current rank
-  printf("Current MPI rank: %d\n", rank);
 
-  char processor_name[MPI_MAX_PROCESSOR_NAME];
-  int name_len;
-  MPI_Get_processor_name(processor_name, &name_len); // Get processor name
-  printf("Processor name: %s\n", processor_name);
+  if (rank == 0) printf("Number of MPI ranks: %d\n", num_ranks);
 
   if(argc != 2) {
     if (rank == 0) {
@@ -201,7 +345,13 @@ int main(int argc, char **argv) {
   int problem_id = atoi(argv[1]);
   const char* s_env = getenv("CFL");
   double S = s_env ? atof(s_env) : 0.90;
-  if (rank == 0) printf("Using stability factor S = %g\n", S);
+  if (rank == 0) {
+    char processor_name[MPI_MAX_PROCESSOR_NAME];
+    int name_len;
+    MPI_Get_processor_name(processor_name, &name_len);
+    printf("Rank 0 running on processor %s\n", processor_name);
+    printf("Using stability factor S = %g\n", S);
+  }
 
   switch(problem_id) {
   case 1: // small size problem
@@ -219,11 +369,13 @@ int main(int argc, char **argv) {
     sampling_rate = 0; // don't save results
     break;
   default:
-    printf("Error: unknown problem id %d\n", problem_id);
+    if (rank == 0) {
+      printf("Error: unknown problem id %d\n", problem_id);
+    }
+    MPI_Finalize();
     return 1;
   }
 
-  // We want that only rank 0 prints the initial information
   if (rank == 0) {
     printf("Solving problem %d:\n", problem_id);
     printf(" - space %gm x %gm (dx=%g, dy=%g; nx=%d, ny=%d)\n",
@@ -237,57 +389,79 @@ int main(int argc, char **argv) {
     printf("Using a %d x %d partitioning of the domain\n", Px, Py);
   }
 
-  // determine this rank's position in the Px x Py grid
-  int rank_x = rank % Px;
-  int rank_y = rank / Px;
+  MPI_Comm comm_cart;
+  int dims[2] = {Px, Py};
+  int periods[2] = {0, 0}; // non-periodic boundaries
+  MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, 1, &comm_cart);
 
-  // determine neighboring ranks
-  const int left_rank = rank_x > 0 ? rank - 1 : MPI_PROC_NULL;
-  const int right_rank = rank_x < Px - 1 ? rank + 1 : MPI_PROC_NULL;
-  const int down_rank = rank_y < Py - 1 ? rank + Px : MPI_PROC_NULL;
-  const int up_rank = rank_y > 0 ? rank - Px : MPI_PROC_NULL;
+  int coords[2];
+  MPI_Cart_coords(comm_cart, rank, 2, coords);
+  int rank_x = coords[0];
+  int rank_y = coords[1];
 
-  // determine this rank's local domain size
-  int local_nx = (nx / Px) + 2; // +2 for ghost cells
-  int local_ny = (ny / Py) + 2;
-  
-  if (rank_x == Px - 1) local_nx = (nx - (nx / Px) * (Px - 1)) + 2;
-  if (rank_y == Py - 1) local_ny = (ny - (ny / Py) * (Py - 1)) + 2;
+  int rank_north, rank_south, rank_east, rank_west;
+  MPI_Cart_shift(comm_cart, 0, 1, &rank_west, &rank_east);  // Direction X (dim 0), shift de 1
+  MPI_Cart_shift(comm_cart, 1, 1, &rank_south, &rank_north); // Direction Y (dim 1), shift de 1
 
-  int global_i_start = rank_x * (nx / Px);
-  int global_j_start = rank_y * (ny / Py);
+  int nx_local, ny_local;
+  int offset_x, offset_y;
+
+  nx_local = nx / Px;
+  ny_local = ny / Py;
+
+  offset_x = rank_x * nx_local;
+  offset_y = rank_y * ny_local;
+
+  printf("Rank %d coordinates (%d,%d) offset (%d,%d) local size (%d,%d)\n",
+         rank, rank_x, rank_y, offset_x, offset_y, nx_local, ny_local);
+
+  int ez_alloc_nx = nx_local;
+  int ez_alloc_ny = ny_local;
+  int hx_alloc_nx = nx_local;
+  int hx_alloc_ny = ny_local - 1;
+  int hy_alloc_nx = nx_local - 1;
+  int hy_alloc_ny = ny_local;
+
+  int local_ez_nx_with_halo = nx_local + (rank_x == 0 ? 1 : 0) + (rank_x == Px - 1 ? 1 : 0);
+  int local_ez_ny_with_halo = ny_local + (rank_y == 0 ? 1 : 0) + (rank_y == Py - 1 ? 1 : 0);
+
+  int real_local_nx_ez = nx_local + 2;
+  int real_local_ny_ez = ny_local + 2;
+
+  int real_local_nx_hx = real_local_nx_ez;
+  int real_local_ny_hx = real_local_ny_ez - 1;
+
+  int real_local_nx_hy = real_local_nx_ez - 1;
+  int real_local_ny_hy = real_local_ny_ez;
 
   struct data ez, hx, hy;
-  if(init_data(&ez, "ez", local_nx, local_ny, dx, dy, 0.) ||
-     init_data(&hx, "hx", local_nx, local_ny, dx, dy, 0.) ||
-     init_data(&hy, "hy", local_nx, local_ny, dx, dy, 0.)) {
+  if(init_data(&ez, "ez", real_local_nx_ez, real_local_ny_ez, dx, dy, 0.) ||
+     init_data(&hx, "hx", real_local_nx_hx, real_local_ny_hx, dx, dy, 0.) ||
+     init_data(&hy, "hy", real_local_nx_hy, real_local_ny_hy, dx, dy, 0.)) {
     printf("Error: could not allocate data on rank %d\n", rank);
     MPI_Finalize();
     return 1;
   }
   
-  MPI_Datatype hy_col_type;
-  MPI_Type_vector(local_ny - 2, 1, local_nx, MPI_DOUBLE, &hy_col_type);
-  MPI_Type_commit(&hy_col_type);
   MPI_Barrier(MPI_COMM_WORLD);
   double start = MPI_Wtime();
 
-  MPI_Request send_requests[4];
-  MPI_Request recv_requests[4];
-  MPI_Status  statuses[4]; 
-
   for(int n = 0; n < nt; n++) {
-    if(rank == 0 && n && (n % (nt / 10)) == 0) {
+    if(n && (n % (nt / 10)) == 0) {
       double time_sofar = MPI_Wtime() - start;
       double eta = (nt - n) * time_sofar / n;
-      printf("Computing time step %d/%d (ETA: %g seconds) \r", n, nt, eta);
-      fflush(stdout);
+      if (rank == 0) {
+        printf("Computing time step %d/%d (ETA: %g seconds) \r", n, nt, eta);
+        fflush(stdout);
+      }
     }
 
+    exchange_halo_ez(comm_cart, rank_x, rank_y, Px, Py, &ez, nx_local, ny_local);
+    
     // update hx and hy
     double chy = dt / (dy * mu);
-    for(int i = 1; i < local_nx - 1; i++) {
-      for(int j = 1; j < local_ny - 2; j++) {
+    for(int i = 1; i < nx_local + 1; i++) {
+      for(int j = 1; j < ny_local; j++) {
         double hx_ij =
           GET(&hx, i, j) - chy * (GET(&ez, i, j + 1) - GET(&ez, i, j));
         SET(&hx, i, j, hx_ij);
@@ -295,89 +469,71 @@ int main(int argc, char **argv) {
     }
     
     double chx = dt / (dx * mu);
-    for(int i = 1; i < local_nx - 2; i++) {
-      for(int j = 1; j < local_ny - 1; j++) {
+    for(int i = 1; i < nx_local; i++) {
+      for(int j = 1; j < ny_local + 1; j++) {
         double hy_ij =
           GET(&hy, i, j) + chx * (GET(&ez, i + 1, j) - GET(&ez, i, j));
         SET(&hy, i, j, hy_ij);
       }
     }
-
-    // Recevoir les fantômes
-    MPI_Irecv(&GET(&hx, 1, 0), local_nx - 2, MPI_DOUBLE, down_rank, 0, MPI_COMM_WORLD, &recv_requests[0]);
-    MPI_Irecv(&GET(&hx, 1, local_ny - 1), local_nx - 2, MPI_DOUBLE, up_rank, 1, MPI_COMM_WORLD, &recv_requests[1]); 
-    MPI_Irecv(&GET(&hy, 0, 1), 1, hy_col_type, left_rank, 2, MPI_COMM_WORLD, &recv_requests[2]); 
-    MPI_Irecv(&GET(&hy, local_nx - 1, 1), 1, hy_col_type, right_rank, 3, MPI_COMM_WORLD, &recv_requests[3]); 
-
-    // Envoyer nos bordures
-    MPI_Isend(&GET(&hx, 1, 1), local_nx - 2, MPI_DOUBLE, down_rank, 1, MPI_COMM_WORLD, &send_requests[0]); 
-    MPI_Isend(&GET(&hx, 1, local_ny - 2), local_nx - 2, MPI_DOUBLE, up_rank, 0, MPI_COMM_WORLD, &send_requests[1]); 
-    MPI_Isend(&GET(&hy, 1, 1), 1, hy_col_type, left_rank,  3, MPI_COMM_WORLD, &send_requests[2]); 
-    MPI_Isend(&GET(&hy, local_nx - 2, 1), 1, hy_col_type, right_rank, 2, MPI_COMM_WORLD, &send_requests[3]); 
+    
+    exchange_halo_h(comm_cart, rank_x, rank_y, Px, Py, &hx, &hy, nx_local, ny_local, 
+      real_local_nx_hx, real_local_ny_hx, real_local_nx_ez, real_local_ny_ez);
 
     // update ez
     double cex = dt / (dx * eps), cey = dt / (dy * eps);
-    for(int i = 2; i < local_nx - 2; i++) {
-      for(int j = 2; j < local_ny - 2; j++) {
+    for(int i = 1; i < nx_local + 1; i++) {
+      for(int j = 1; j < ny_local + 1; j++) {
         double ez_ij = GET(&ez, i, j) +
                        cex * (GET(&hy, i, j) - GET(&hy, i - 1, j)) -
                        cey * (GET(&hx, i, j) - GET(&hx, i, j - 1));
         SET(&ez, i, j, ez_ij);
       }
     }
-
-    MPI_Waitall(4, recv_requests, statuses);
-
-    for(int j = 1; j < local_ny - 1; j++) {
-      double ez_ij = GET(&ez, 1, j) +
-                     cex * (GET(&hy, 1, j) - GET(&hy, 0, j)) - // hy[0,j] is ghost
-                     cey * (GET(&hx, 1, j) - GET(&hx, 1, j - 1));
-      SET(&ez, 1, j, ez_ij);
-    }
-
-    for(int j = 1; j < local_ny - 1; j++) {
-      double ez_ij = GET(&ez, local_nx - 2, j) +
-                     cex * (GET(&hy, local_nx - 2, j) - GET(&hy, local_nx - 3, j)) -
-                     cey * (GET(&hx, local_nx - 2, j) - GET(&hx, local_nx - 2, j - 1));
-      SET(&ez, local_nx - 2, j, ez_ij);
-    }
-
-    for(int i = 2; i < local_nx - 2; i++) { 
-      double ez_ij = GET(&ez, i, 1) +
-                     cex * (GET(&hy, i, 1) - GET(&hy, i - 1, 1)) -
-                     cey * (GET(&hx, i, 1) - GET(&hx, i, 0)); // hx[i,0] is ghost
-      SET(&ez, i, 1, ez_ij);
-    }
-
-    for(int i = 2; i < local_nx - 2; i++) { 
-      double ez_ij = GET(&ez, i, local_ny - 2) +
-                     cex * (GET(&hy, i, local_ny - 2) - GET(&hy, i - 1, local_ny - 2)) -
-                     cey * (GET(&hx, i, local_ny - 2) - GET(&hx, i, local_ny - 3));
-      SET(&ez, i, local_ny - 2, ez_ij);
-    }
-
+  
     // impose source
     double t = n * dt;
     switch(problem_id) {
     case 1:
     case 2:
-      int source_i_global = nx / 2;
-      int source_j_global = ny / 2;
+      int source_x_global = nx / 2;
+      int source_y_global = ny / 2;
 
-      if (source_i_global >= global_i_start &&
-          source_i_global < (global_i_start + local_nx - 2) &&
-          source_j_global >= global_j_start &&
-          source_j_global < (global_j_start + local_ny - 2)) {
-        int source_i_local = (source_i_global - global_i_start) + 1; // +1 for ghost cell
-        int source_j_local = (source_j_global - global_j_start) + 1; // +1 for ghost cell
-      // sinusoidal excitation at 2.4 GHz in the middle of the domain
-      SET(&ez, source_i_local, source_j_local, sin(2. * M_PI * 2.4e9 * t));
+      if (source_x_global >= offset_x && source_x_global < offset_x + nx_local &&
+          source_y_global >= offset_y && source_y_global < offset_y + ny_local) {
+        int source_x_local = source_x_global - offset_x; 
+        int source_y_local = source_y_global - offset_y; 
+        SET(&ez, source_x_local + 1, source_y_local + 1, sin(2. * M_PI * 2.4e9 * t));
       }
-      //SET(&ez, nx / 2, ny / 2, sin(2. * M_PI * 2.4e9 * t));
       break;
     default:
       if (rank == 0) printf("Error: unknown source\n");
       break;
+    }
+
+    // Si le rang est sur le bord gauche global (rank_x == 0)
+    if (rank_x == 0) {
+        for (int j = 0; j < real_local_ny_ez; j++) { // Tous les y
+            SET(&ez, 1, j, 0.); // La première colonne interne (à droite du halo 0)
+        }
+    }
+    // Si le rang est sur le bord droit global (rank_x == Px - 1)
+    if (rank_x == Px - 1) {
+        for (int j = 0; j < real_local_ny_ez; j++) {
+            SET(&ez, nx_local, j, 0.); // La dernière colonne interne (à gauche du halo nx_local+1)
+        }
+    }
+    // Si le rang est sur le bord bas global (rank_y == 0)
+    if (rank_y == 0) {
+        for (int i = 0; i < real_local_nx_ez; i++) {
+            SET(&ez, i, 1, 0.); // La première rangée interne
+        }
+    }
+    // Si le rang est sur le bord haut global (rank_y == Py - 1)
+    if (rank_y == Py - 1) {
+        for (int i = 0; i < real_local_nx_ez; i++) {
+            SET(&ez, i, ny_local, 0.); // La dernière rangée interne
+        }
     }
 
     // output step data in VTK format
@@ -405,6 +561,7 @@ int main(int argc, char **argv) {
   free_data(&ez);
   free_data(&hx);
   free_data(&hy);
+
 
   MPI_Finalize();
   return 0;

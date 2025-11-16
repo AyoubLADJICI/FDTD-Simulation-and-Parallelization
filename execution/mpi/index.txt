@@ -1,0 +1,18 @@
+=== Running problem 2 with CFL=0.30 ===
+probleme2_cfl0p30.out
+=== Running problem 2 with CFL=0.50 ===
+probleme2_cfl0p50.out
+=== Running problem 2 with CFL=0.80 ===
+probleme2_cfl0p80.out
+=== Running problem 2 with CFL=0.90 ===
+probleme2_cfl0p90.out
+=== Running problem 2 with CFL=0.95 ===
+probleme2_cfl0p95.out
+=== Running problem 2 with CFL=0.98 ===
+probleme2_cfl0p98.out
+=== Running problem 2 with CFL=1.00 ===
+probleme2_cfl1p00.out
+=== Running problem 2 with CFL=1.02 ===
+probleme2_cfl1p02.out
+=== Running problem 2 with CFL=1.05 ===
+probleme2_cfl1p05.out
